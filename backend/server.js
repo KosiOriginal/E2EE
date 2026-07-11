@@ -24,7 +24,7 @@ const WebSocket = require('ws'); // npm install ws
 const { DatabaseSync } = require('node:sqlite');
 
 const app = express();
-const PORT = 9000;
+const PORT = process.env.PORT || 9000;
 
 app.use(express.json({ limit: '10mb' })); // media chunks can be sizeable
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
@@ -139,16 +139,21 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'register') {
       myFingerprint = msg.fingerprint;
+      console.log(`[register] ${myFingerprint}`);
       connectedClients.set(myFingerprint, ws);
-      flushMailbox(myFingerprint, ws); // deliver anything that piled up while they were away
+      console.log(`[connected clients]`, [...connectedClients.keys()]);
+      flushMailbox(myFingerprint, ws);
       return;
     }
 
     if (msg.type === 'relay') {
+      console.log(`[relay attempt] from=${myFingerprint} to=${msg.to}`);
       const recipientWs = connectedClients.get(msg.to);
       if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+        console.log(`[relay] recipient online, delivering directly`);
         recipientWs.send(JSON.stringify({ type: 'relay', from: myFingerprint, packet: msg.packet }));
       } else {
+        console.log(`[relay] recipient NOT connected, queuing. Known clients:`, [...connectedClients.keys()]);
         queueMessage(msg.to, myFingerprint, msg.packet);
       }
       return;
@@ -156,6 +161,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (myFingerprint) connectedClients.delete(myFingerprint);
+    if (myFingerprint) {
+      console.log(`[disconnect] ${myFingerprint}`);
+      connectedClients.delete(myFingerprint);
+    }
   });
 });
