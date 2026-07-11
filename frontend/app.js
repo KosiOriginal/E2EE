@@ -141,6 +141,46 @@ async function addContactFlow() {
 
 // ---- Networking ----
 
+let reconnectAttempts = 0;
+let heartbeatInterval = null;
+
+function connectWebSocket() {
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${protocol}://${location.host}`);
+
+  ws.onopen = () => {
+    reconnectAttempts = 0;
+    ws.send(JSON.stringify({ type: 'register', fingerprint: myFingerprint }));
+    el('status').textContent = 'Connected to relay';
+
+    // Send a small ping periodically. Hosting platforms (Render and
+    // most others) close WebSocket connections after ~30-60s of no
+    // traffic — without this, the connection silently dies and you'd
+    // have to refresh the page to get a new one.
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 20000);
+  };
+
+  ws.onclose = () => {
+    clearInterval(heartbeatInterval);
+    el('status').textContent = 'Disconnected — reconnecting...';
+    // Auto-reconnect with backoff instead of requiring a manual refresh.
+    reconnectAttempts++;
+    const delay = Math.min(1000 * reconnectAttempts, 8000);
+    setTimeout(connectWebSocket, delay);
+  };
+
+  ws.onerror = () => {
+    ws.close(); // triggers onclose -> reconnect logic above
+  };
+
+  attachMessageHandler();
+}
+
 async function init() {
   myIdentity = SecnetIdentity.loadOrCreateIdentity();
   myFingerprint = SecnetIdentity.fingerprint(myIdentity.publicKey);
@@ -148,17 +188,10 @@ async function init() {
   el('myPublicKey').textContent = SecnetIdentity.toB64(myIdentity.publicKey);
 
   renderContactList();
+  connectWebSocket();
+}
 
-  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${protocol}://${location.host}`);
-
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'register', fingerprint: myFingerprint }));
-    el('status').textContent = 'Connected to relay';
-  };
-  ws.onclose = () => {
-    el('status').textContent = 'Disconnected — refresh to reconnect';
-  };
+function attachMessageHandler() {
 
   // Incoming messages must be processed ONE AT A TIME, in order.
   // If two messages arrive close together, the browser would otherwise
