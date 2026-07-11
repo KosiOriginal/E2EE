@@ -3,17 +3,16 @@
  * server.js — Relay server for the private chat network.
  *
  * IMPORTANT SECURITY PROPERTY: this server NEVER decrypts anything.
- * It only does two jobs:
- *   1. Bulletin board — stores public prekey bundles so people can
- *      start a conversation with someone who's currently offline.
+ * It only does:
+ *   1. Bulletin board — stores public keys/prekey bundles so people
+ *      can start a conversation with someone currently offline.
  *   2. Mailbox / relay — forwards encrypted packets between clients,
- *      and queues them in memory if the recipient isn't connected
- *      right now (this is "store-and-forward").
+ *      and PERSISTS them to disk if the recipient isn't connected
+ *      right now, so a server restart doesn't lose queued messages.
  *
- * The server operator (you, or whoever hosts this) can NEVER read
- * message content — only ciphertext passes through here. All the
- * actual encryption/decryption happens on each user's device
- * (in the frontend, using crypto_core logic).
+ * Everything here is stored in SQLite (data.db, created automatically
+ * next to this file). Only ciphertext ever touches this database —
+ * the server has no way to read message content.
  */
 
 const express = require('express');
@@ -22,58 +21,83 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const WebSocket = require('ws'); // npm install ws
+const { DatabaseSync } = require('node:sqlite');
 
 const app = express();
-const PORT = process.env.PORT || 9000;
+const PORT = 9000;
 
 app.use(express.json({ limit: '10mb' })); // media chunks can be sizeable
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
-// ---- In-memory state (swap for a real DB later if you want persistence) ----
+// ---- Persistent storage ----
 
-// fingerprint -> { ws, lastSeen }
-const connectedClients = new Map();
+const db = new DatabaseSync(path.join(__dirname, 'data.db'));
 
-// fingerprint -> published prekey bundle (public parts only!)
-const publishedBundles = new Map();
+db.exec(`
+  CREATE TABLE IF NOT EXISTS bundles (
+    fingerprint TEXT PRIMARY KEY,
+    bundle_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
 
-// fingerprint -> array of queued encrypted packets waiting for them to connect
-const mailboxes = new Map();
+  CREATE TABLE IF NOT EXISTS mailbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recipient_fingerprint TEXT NOT NULL,
+    from_fingerprint TEXT NOT NULL,
+    packet_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
 
-function queueMessage(recipientFingerprint, packet) {
-  if (!mailboxes.has(recipientFingerprint)) {
-    mailboxes.set(recipientFingerprint, []);
-  }
-  mailboxes.get(recipientFingerprint).push(packet);
+  CREATE INDEX IF NOT EXISTS idx_mailbox_recipient ON mailbox (recipient_fingerprint);
+`);
+
+const stmts = {
+  upsertBundle: db.prepare(
+    'INSERT INTO bundles (fingerprint, bundle_json, updated_at) VALUES (?, ?, ?) ' +
+    'ON CONFLICT(fingerprint) DO UPDATE SET bundle_json = excluded.bundle_json, updated_at = excluded.updated_at'
+  ),
+  getBundle: db.prepare('SELECT bundle_json FROM bundles WHERE fingerprint = ?'),
+  queueMessage: db.prepare(
+    'INSERT INTO mailbox (recipient_fingerprint, from_fingerprint, packet_json, created_at) VALUES (?, ?, ?, ?)'
+  ),
+  getMailbox: db.prepare(
+    'SELECT id, from_fingerprint, packet_json FROM mailbox WHERE recipient_fingerprint = ? ORDER BY id ASC'
+  ),
+  deleteMailboxEntry: db.prepare('DELETE FROM mailbox WHERE id = ?'),
+};
+
+function queueMessage(recipientFingerprint, fromFingerprint, packet) {
+  stmts.queueMessage.run(recipientFingerprint, fromFingerprint, JSON.stringify(packet), Date.now());
 }
 
 function flushMailbox(fingerprint, ws) {
-  const queued = mailboxes.get(fingerprint) || [];
-  for (const qMsg of queued) {
-    // Разопаковаме qMsg правилно
-    ws.send(JSON.stringify({ type: 'relay', from: qMsg.from, packet: qMsg.packet }));
+  const rows = stmts.getMailbox.all(fingerprint);
+  for (const row of rows) {
+    // Same flat shape as live delivery below — from, packet, both present.
+    ws.send(JSON.stringify({
+      type: 'relay',
+      from: row.from_fingerprint,
+      packet: JSON.parse(row.packet_json),
+    }));
+    stmts.deleteMailboxEntry.run(row.id);
   }
-  mailboxes.set(fingerprint, []);
 }
 
 // ---- REST: publishing / fetching prekey bundles (for the X3DH handshake) ----
 
-// A device publishes its bundle once (public keys only) so others
-// can start a session with it even while it's offline.
 app.post('/api/publish-bundle', (req, res) => {
   const { fingerprint, bundle } = req.body;
   if (!fingerprint || !bundle) {
     return res.status(400).json({ error: 'fingerprint and bundle required' });
   }
-  publishedBundles.set(fingerprint, bundle);
+  stmts.upsertBundle.run(fingerprint, JSON.stringify(bundle), Date.now());
   res.json({ ok: true });
 });
 
-// Fetch someone's published bundle to start a session with them
 app.get('/api/bundle/:fingerprint', (req, res) => {
-  const bundle = publishedBundles.get(req.params.fingerprint);
-  if (!bundle) return res.status(404).json({ error: 'no bundle published for this fingerprint' });
-  res.json({ bundle });
+  const row = stmts.getBundle.get(req.params.fingerprint);
+  if (!row) return res.status(404).json({ error: 'no bundle published for this fingerprint' });
+  res.json({ bundle: JSON.parse(row.bundle_json) });
 });
 
 // Serve the frontend for any other route
@@ -100,6 +124,7 @@ try {
 // ---- WebSocket layer: real-time relay of encrypted packets ----
 
 const wss = new WebSocket.Server({ server });
+const connectedClients = new Map(); // fingerprint -> ws (only live, in-memory — fine to lose on restart)
 
 wss.on('connection', (ws) => {
   let myFingerprint = null;
@@ -109,27 +134,22 @@ wss.on('connection', (ws) => {
     try {
       msg = JSON.parse(raw);
     } catch {
-      return; // ignore malformed input
+      return;
     }
 
     if (msg.type === 'register') {
-      // Client announces "I am this fingerprint" after connecting.
-      // (In a hardened version, add a signed challenge here so nobody
-      // can falsely claim someone else's fingerprint.)
       myFingerprint = msg.fingerprint;
-      connectedClients.set(myFingerprint, { ws, lastSeen: Date.now() });
-      flushMailbox(myFingerprint, ws); // deliver anything queued while they were away
+      connectedClients.set(myFingerprint, ws);
+      flushMailbox(myFingerprint, ws); // deliver anything that piled up while they were away
       return;
     }
 
     if (msg.type === 'relay') {
-      // msg.to = recipient fingerprint, msg.packet = opaque encrypted blob
-      // Server never inspects msg.packet's contents beyond routing it.
-      const recipient = connectedClients.get(msg.to);
-      if (recipient) {
-        recipient.ws.send(JSON.stringify({ type: 'relay', from: myFingerprint, packet: msg.packet }));
+      const recipientWs = connectedClients.get(msg.to);
+      if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+        recipientWs.send(JSON.stringify({ type: 'relay', from: myFingerprint, packet: msg.packet }));
       } else {
-        queueMessage(msg.to, { from: myFingerprint, packet: msg.packet });
+        queueMessage(msg.to, myFingerprint, msg.packet);
       }
       return;
     }

@@ -6,64 +6,83 @@
 <title>secnet — private chat</title>
 <style>
   body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 0; }
-  .container { max-width: 640px; margin: 0 auto; padding: 16px; }
-  h1 { font-size: 1.2rem; color: #7fd; }
+  .layout { display: flex; height: 100vh; }
+  .sidebar { width: 260px; background: #1a1a1a; border-right: 1px solid #333; padding: 12px; box-sizing: border-box; overflow-y: auto; }
+  .main { flex: 1; padding: 16px; box-sizing: border-box; overflow-y: auto; }
+  h1 { font-size: 1.1rem; color: #7fd; margin-top: 0; }
   .panel { background: #1c1c1c; border: 1px solid #333; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-  .mono { font-family: monospace; word-break: break-all; font-size: 0.85rem; color: #9cf; }
-  #status { color: #9f9; font-size: 0.9rem; }
+  .mono { font-family: monospace; word-break: break-all; font-size: 0.8rem; color: #9cf; }
+  #status { color: #9f9; font-size: 0.85rem; margin-bottom: 10px; }
   #chatLog { height: 300px; overflow-y: auto; background: #000; border-radius: 6px; padding: 8px; margin-bottom: 8px; }
-  .msg { margin-bottom: 8px; padding: 6px 8px; border-radius: 6px; max-width: 120%; }
+  .msg { margin-bottom: 8px; padding: 6px 8px; border-radius: 6px; max-width: 80%; }
   .msg.me { background: #234; margin-left: auto; text-align: right; }
   .msg.friend { background: #333; margin-right: auto; }
-  input[type=text] { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; box-sizing: border-box; }
-  button { padding: 8px 12px; border-radius: 6px; border: none; background: #2a6; color: white; cursor: pointer; margin-top: 6px; }
+  input[type=text] { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; box-sizing: border-box; margin-bottom: 6px; }
+  button { padding: 8px 12px; border-radius: 6px; border: none; background: #2a6; color: white; cursor: pointer; margin-top: 4px; }
   button:hover { background: #3b7; }
   .row { display: flex; gap: 8px; align-items: center; }
-  .row input[type=text] { flex: 1; }
+  .row input[type=text] { flex: 1; margin-bottom: 0; }
+  .contact-item { padding: 8px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; }
+  .contact-item:hover { background: #2a2a2a; }
+  .contact-item.active { background: #2a6; color: white; }
+  #chatPanel { display: none; }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>🔒 secnet — private chat</h1>
+<div class="layout">
 
-  <div class="panel">
-    <div><strong>Тва е fingerprinta</strong> :</div>
-    <div class="mono" id="myFingerprint">...</div>
-    <div style="margin-top:8px;"><strong>ТУЙ трябва да го пратиш на некого </strong> :</div>
-    <div class="mono" id="myPublicKey">...</div>
-  </div>
+  <div class="sidebar">
+    <h1>🔒 secnet</h1>
 
-  <div class="panel">
-    <div><strong>Connect to a friend</strong> — paste the public key they shared with you:</div>
-    <div class="row">
-      <input type="text" id="friendKeyInput" placeholder="Paste friend's public key here" />
-      <button id="connectBtn">Connect</button>
+    <div class="panel">
+      <div><strong>Your fingerprint</strong> (share/verify with friends):</div>
+      <div class="mono" id="myFingerprint">...</div>
+      <div style="margin-top:8px;"><strong>Your public key</strong> (share this so friends can add you):</div>
+      <div class="mono" id="myPublicKey">...</div>
     </div>
-    <div style="margin-top:8px;">Friend fingerprint: <span class="mono" id="friendFingerprint">(none yet)</span></div>
-  </div>
 
-  <div id="status">Connecting...</div>
-
-  <div class="panel">
-    <div id="chatLog"></div>
-    <div class="row">
-      <input type="text" id="messageInput" placeholder="Type a message..." />
-      <button id="sendBtn">Send</button>
+    <div class="panel">
+      <div><strong>Add a contact</strong></div>
+      <input type="text" id="newContactName" placeholder="Name (e.g. Alex)" />
+      <input type="text" id="newContactKey" placeholder="Paste their public key" />
+      <button id="addContactBtn">Add contact</button>
     </div>
-    <div class="row" style="margin-top:8px;">
-      <label style="cursor:pointer;">
-        📷 Send image
-        <input type="file" id="imageInput" accept="image/*" style="display:none;" />
-      </label>
-      <button id="recordBtn">🎙 Record voice note</button>
+
+    <div class="panel">
+      <div><strong>Contacts</strong></div>
+      <div id="contactList"></div>
     </div>
   </div>
+
+  <div class="main">
+    <div id="status">Connecting...</div>
+
+    <div id="chatPanel" class="panel">
+      <div><strong id="activeContactName"></strong></div>
+      <div class="mono" id="activeContactFingerprint" style="margin-bottom:8px;"></div>
+
+      <div id="chatLog"></div>
+      <div class="row">
+        <input type="text" id="messageInput" placeholder="Type a message..." />
+        <button id="sendBtn">Send</button>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <label style="cursor:pointer;">
+          📷 Send image
+          <input type="file" id="imageInput" accept="image/*" style="display:none;" />
+        </label>
+        <button id="recordBtn">🎙 Record voice note</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl.min.js"></script>
 <script src="crypto/identity_browser.js"></script>
 <script src="crypto/ratchet_browser.js"></script>
 <script src="crypto/media_browser.js"></script>
+<script src="crypto/contacts.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

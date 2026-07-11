@@ -1,99 +1,23 @@
 'use strict';
 /**
- * app.js — chat application logic.
+ * app.js — chat application logic, multi-contact version.
  *
- * Flow:
- *  1. Generate/load my identity on page load, show my fingerprint.
- *  2. Connect to the relay server over WebSocket, register my fingerprint.
- *  3. Paste in a friend's public key (they get it by sharing their own
- *     fingerprint/key with you out-of-band — text it, say it in person, etc).
- *  4. That derives a shared secret -> seeds a ratchet -> every message
- *     after that gets its own encryption key.
- *  5. Send text, images, or voice notes — all encrypted client-side
- *     before they ever touch the network.
+ * Each contact has:
+ *  - a name you gave them
+ *  - their public key (fixed — this is their permanent identity)
+ *  - a ratchet whose state is saved to localStorage after every
+ *    single message, so reloading the page does NOT desync you
+ *    from your friend anymore
+ *  - message history, also saved locally
  */
 
 let myIdentity;
 let myFingerprint;
 let ws;
-let friendPublicKey = null;
-let friendFingerprint = null;
-let ratchet = null; // one active conversation at a time in this version
-
-
-
-
-let currentContact = null;
-
-// Когато кликнеш върху контакт от списъка
-async function selectContact(contact) {
-  currentContact = contact;
-  console.log("Сега чатиш с:", contact.name);
-  
-  // 1. Изчисти чат прозореца
-  document.getElementById('chat-window').innerHTML = '';
-  
-  // 2. Зареди историята за този контакт
-  const messages = await getMessagesForContact(contact.id);
-  renderMessages(messages);
-}
-
-
-
-async function sendMessage(messageText) {
-  if (!currentContact) return;
-
-  // Вземи ключа на човека от базата
-  const secretKey = currentContact.sharedSecret;
-  
-  // Криптирай с неговия ключ
-  const encrypted = await encryptMessage(messageText, secretKey);
-  
-  // Прати през WebSocket
-  socket.send(JSON.stringify({
-    to: currentContact.id,
-    data: encrypted
-  }));
-}
+let activeFingerprint = null; // which contact's conversation is open
+let activeRatchet = null;
 
 const el = (id) => document.getElementById(id);
-
-function appendMessage(who, text) {
-  const div = document.createElement('div');
-  div.className = `msg ${who}`;
-  div.textContent = `${who === 'me' ? 'You' : 'Friend'}: ${text}`;
-  el('chatLog').appendChild(div);
-  el('chatLog').scrollTop = el('chatLog').scrollHeight;
-}
-
-function appendImage(who, blobUrl) {
-  const wrapper = document.createElement('div');
-  wrapper.className = `msg ${who}`;
-  const label = document.createElement('div');
-  label.textContent = who === 'me' ? 'You sent an image:' : 'Friend sent an image:';
-  const img = document.createElement('img');
-  img.src = blobUrl;
-  img.style.maxWidth = '240px';
-  img.style.display = 'block';
-  wrapper.appendChild(label);
-  wrapper.appendChild(img);
-  el('chatLog').appendChild(wrapper);
-  el('chatLog').scrollTop = el('chatLog').scrollHeight;
-}
-
-function appendAudio(who, blobUrl) {
-  const wrapper = document.createElement('div');
-  wrapper.className = `msg ${who}`;
-  const label = document.createElement('div');
-  label.textContent = who === 'me' ? 'You sent a voice note:' : 'Friend sent a voice note:';
-  const audio = document.createElement('audio');
-  audio.controls = true;
-  audio.src = blobUrl;
-  wrapper.appendChild(label);
-  wrapper.appendChild(audio);
-  el('chatLog').appendChild(wrapper);
-  el('chatLog').scrollTop = el('chatLog').scrollHeight;
-}
 
 function packetToJSON(packet) {
   return {
@@ -110,11 +34,120 @@ function packetFromJSON(obj) {
   };
 }
 
+// ---- Rendering ----
+
+function renderContactList() {
+  const list = el('contactList');
+  list.innerHTML = '';
+  const contacts = SecnetContacts.listContacts();
+
+  for (const c of contacts) {
+    const item = document.createElement('div');
+    item.className = 'contact-item' + (c.fingerprint === activeFingerprint ? ' active' : '');
+    item.textContent = c.name;
+    item.addEventListener('click', () => openContact(c.fingerprint));
+    list.appendChild(item);
+  }
+}
+
+function renderChatLog(messages) {
+  const chatLog = el('chatLog');
+  chatLog.innerHTML = '';
+  for (const m of messages) renderOneMessage(m);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function renderOneMessage(m) {
+  const chatLog = el('chatLog');
+  const wrapper = document.createElement('div');
+  wrapper.className = `msg ${m.who}`;
+
+  if (m.kind === 'text') {
+    wrapper.textContent = `${m.who === 'me' ? 'You' : 'Friend'}: ${m.content}`;
+  } else if (m.kind === 'image') {
+    const label = document.createElement('div');
+    label.textContent = m.who === 'me' ? 'You sent an image:' : 'Friend sent an image:';
+    const img = document.createElement('img');
+    img.src = m.content; // object URL
+    img.style.maxWidth = '240px';
+    img.style.display = 'block';
+    wrapper.appendChild(label);
+    wrapper.appendChild(img);
+  } else if (m.kind === 'voice') {
+    const label = document.createElement('div');
+    label.textContent = m.who === 'me' ? 'You sent a voice note:' : 'Friend sent a voice note:';
+    const audio = document.createElement('audio');
+    audio.controls = true;
+    audio.src = m.content;
+    wrapper.appendChild(label);
+    wrapper.appendChild(audio);
+  }
+
+  chatLog.appendChild(wrapper);
+}
+
+function addAndRenderMessage(fingerprint, message) {
+  SecnetContacts.appendMessageToHistory(fingerprint, message);
+  if (fingerprint === activeFingerprint) {
+    renderOneMessage(message);
+    el('chatLog').scrollTop = el('chatLog').scrollHeight;
+  }
+}
+
+// ---- Conversation management ----
+
+function openContact(fingerprint) {
+  activeFingerprint = fingerprint;
+  const contact = SecnetContacts.getContact(fingerprint);
+  if (!contact) return;
+
+  el('activeContactName').textContent = contact.name;
+  el('activeContactFingerprint').textContent = fingerprint;
+  el('chatPanel').style.display = 'block';
+
+  activeRatchet = contact.ratchetState
+    ? SecnetRatchet.RatchetBrowser.fromJSON(contact.ratchetState)
+    : null;
+
+  renderChatLog(contact.messages);
+  renderContactList();
+}
+
+function saveActiveRatchetState() {
+  if (!activeFingerprint || !activeRatchet) return;
+  SecnetContacts.updateRatchetState(activeFingerprint, activeRatchet.toJSON());
+}
+
+async function addContactFlow() {
+  const name = el('newContactName').value.trim();
+  const keyB64 = el('newContactKey').value.trim();
+  if (!name || !keyB64) return;
+
+  const publicKeyBytes = SecnetIdentity.fromB64(keyB64);
+  const fingerprint = SecnetIdentity.fingerprint(publicKeyBytes);
+
+  SecnetContacts.addContact(fingerprint, name, keyB64);
+
+  // Establish the shared secret now and save it as the starting ratchet state
+  const sharedSecret = await SecnetIdentity.deriveSharedSecret(myIdentity.secretKey, publicKeyBytes);
+  const ratchet = new SecnetRatchet.RatchetBrowser(sharedSecret);
+  SecnetContacts.updateRatchetState(fingerprint, ratchet.toJSON());
+
+  el('newContactName').value = '';
+  el('newContactKey').value = '';
+  renderContactList();
+  openContact(fingerprint);
+}
+
+// ---- Networking ----
+
 async function init() {
   myIdentity = SecnetIdentity.loadOrCreateIdentity();
   myFingerprint = SecnetIdentity.fingerprint(myIdentity.publicKey);
   el('myFingerprint').textContent = myFingerprint;
   el('myPublicKey').textContent = SecnetIdentity.toB64(myIdentity.publicKey);
+
+  renderContactList();
 
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${protocol}://${location.host}`);
@@ -123,7 +156,6 @@ async function init() {
     ws.send(JSON.stringify({ type: 'register', fingerprint: myFingerprint }));
     el('status').textContent = 'Connected to relay';
   };
-
   ws.onclose = () => {
     el('status').textContent = 'Disconnected — refresh to reconnect';
   };
@@ -131,14 +163,25 @@ async function init() {
   ws.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type !== 'relay') return;
-    if (!ratchet) return; // no session established yet, drop it
+
+    const fromFingerprint = msg.from;
+    const contact = SecnetContacts.getContact(fromFingerprint);
+    if (!contact) return; // message from someone not in your contacts — ignored
+
+    // Load that contact's ratchet (may not be the currently open conversation)
+    const ratchet = contact.ratchetState
+      ? SecnetRatchet.RatchetBrowser.fromJSON(contact.ratchetState)
+      : null;
+    if (!ratchet) return;
 
     const payload = msg.packet;
 
     if (payload.kind === 'text') {
       const packet = packetFromJSON(payload.packet);
       const plaintext = await ratchet.decrypt(packet);
-      appendMessage('friend', new TextDecoder().decode(plaintext));
+      SecnetContacts.updateRatchetState(fromFingerprint, ratchet.toJSON());
+      addAndRenderMessage(fromFingerprint, { who: 'friend', kind: 'text', content: new TextDecoder().decode(plaintext), ts: Date.now() });
+      if (fromFingerprint === activeFingerprint) activeRatchet = ratchet; // keep in-memory copy in sync
     }
 
     if (payload.kind === 'media') {
@@ -149,52 +192,41 @@ async function init() {
         chunks: payload.chunks.map(packetFromJSON),
       };
       const fileBytes = await SecnetMedia.reassembleMedia(envelope, ratchet);
+      SecnetContacts.updateRatchetState(fromFingerprint, ratchet.toJSON());
       const blob = new Blob([fileBytes], { type: payload.mediaType === 'image' ? 'image/png' : 'audio/webm' });
       const url = URL.createObjectURL(blob);
-      if (payload.mediaType === 'image') appendImage('friend', url);
-      else appendAudio('friend', url);
+      addAndRenderMessage(fromFingerprint, { who: 'friend', kind: payload.mediaType, content: url, ts: Date.now() });
+      if (fromFingerprint === activeFingerprint) activeRatchet = ratchet;
     }
   };
 }
 
-async function connectToFriend() {
-  const pubKeyB64 = el('friendKeyInput').value.trim();
-  if (!pubKeyB64) return;
-
-  friendPublicKey = SecnetIdentity.fromB64(pubKeyB64);
-  friendFingerprint = SecnetIdentity.fingerprint(friendPublicKey);
-
-  const sharedSecret = await SecnetIdentity.deriveSharedSecret(myIdentity.secretKey, friendPublicKey);
-  ratchet = new SecnetRatchet.RatchetBrowser(sharedSecret);
-
-  el('friendFingerprint').textContent = friendFingerprint;
-  el('status').textContent = `Session established — verify this fingerprint matches your friend's out loud: ${friendFingerprint}`;
-  appendMessage('me', '[session started]');
-}
-
 async function sendText() {
   const text = el('messageInput').value;
-  if (!text || !ratchet || !friendFingerprint) return;
+  if (!text || !activeRatchet || !activeFingerprint) return;
 
-  const packet = await ratchet.encrypt(new TextEncoder().encode(text));
+  const packet = await activeRatchet.encrypt(new TextEncoder().encode(text));
+  saveActiveRatchetState();
+
   ws.send(JSON.stringify({
     type: 'relay',
-    to: friendFingerprint,
+    to: activeFingerprint,
     packet: { kind: 'text', packet: packetToJSON(packet) },
   }));
 
-  appendMessage('me', text);
+  addAndRenderMessage(activeFingerprint, { who: 'me', kind: 'text', content: text, ts: Date.now() });
   el('messageInput').value = '';
 }
 
 async function sendFile(file, mediaType) {
-  if (!ratchet || !friendFingerprint) return;
+  if (!activeRatchet || !activeFingerprint) return;
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const envelope = await SecnetMedia.prepareMedia(bytes, mediaType, ratchet);
+  const envelope = await SecnetMedia.prepareMedia(bytes, mediaType, activeRatchet);
+  saveActiveRatchetState();
 
   ws.send(JSON.stringify({
     type: 'relay',
-    to: friendFingerprint,
+    to: activeFingerprint,
     packet: {
       kind: 'media',
       mediaId: envelope.mediaId,
@@ -204,8 +236,7 @@ async function sendFile(file, mediaType) {
   }));
 
   const url = URL.createObjectURL(file);
-  if (mediaType === 'image') appendImage('me', url);
-  else appendAudio('me', url);
+  addAndRenderMessage(activeFingerprint, { who: 'me', kind: mediaType, content: url, ts: Date.now() });
 }
 
 // ---- Voice recording ----
@@ -225,7 +256,6 @@ async function startRecording() {
   mediaRecorder.start();
   el('recordBtn').textContent = 'Stop recording';
 }
-
 function stopRecording() {
   if (mediaRecorder) mediaRecorder.stop();
   el('recordBtn').textContent = 'Record voice note';
@@ -234,12 +264,11 @@ function stopRecording() {
 window.addEventListener('DOMContentLoaded', () => {
   init();
 
-  el('connectBtn').addEventListener('click', connectToFriend);
+  el('addContactBtn').addEventListener('click', addContactFlow);
   el('sendBtn').addEventListener('click', sendText);
   el('messageInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendText();
   });
-
   el('imageInput').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) sendFile(file, 'image');
