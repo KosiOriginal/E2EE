@@ -20,6 +20,42 @@ let friendPublicKey = null;
 let friendFingerprint = null;
 let ratchet = null; // one active conversation at a time in this version
 
+
+
+
+let currentContact = null;
+
+// Когато кликнеш върху контакт от списъка
+async function selectContact(contact) {
+  currentContact = contact;
+  console.log("Сега чатиш с:", contact.name);
+  
+  // 1. Изчисти чат прозореца
+  document.getElementById('chat-window').innerHTML = '';
+  
+  // 2. Зареди историята за този контакт
+  const messages = await getMessagesForContact(contact.id);
+  renderMessages(messages);
+}
+
+
+
+async function sendMessage(messageText) {
+  if (!currentContact) return;
+
+  // Вземи ключа на човека от базата
+  const secretKey = currentContact.sharedSecret;
+  
+  // Криптирай с неговия ключ
+  const encrypted = await encryptMessage(messageText, secretKey);
+  
+  // Прати през WebSocket
+  socket.send(JSON.stringify({
+    to: currentContact.id,
+    data: encrypted
+  }));
+}
+
 const el = (id) => document.getElementById(id);
 
 function appendMessage(who, text) {
