@@ -24,7 +24,7 @@ const fs = require('fs');
 const WebSocket = require('ws'); // npm install ws
 
 const app = express();
-const PORT = 9000;
+const PORT = process.env.PORT || 9000;
 
 app.use(express.json({ limit: '10mb' })); // media chunks can be sizeable
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
