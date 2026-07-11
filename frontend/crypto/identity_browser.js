@@ -24,7 +24,8 @@ function toB64(bytes) {
   return btoa(String.fromCharCode(...bytes));
 }
 function fromB64(str) {
-  return new Uint8Array(atob(str).split('').map((c) => c.charCodeAt(0)));
+  const clean = str.trim().replace(/\s+/g, '');
+  return new Uint8Array(atob(clean).split('').map((c) => c.charCodeAt(0)));
 }
 
 function loadOrCreateIdentity() {

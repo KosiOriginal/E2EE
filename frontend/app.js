@@ -160,7 +160,21 @@ async function init() {
     el('status').textContent = 'Disconnected — refresh to reconnect';
   };
 
-  ws.onmessage = async (event) => {
+  // Incoming messages must be processed ONE AT A TIME, in order.
+  // If two messages arrive close together, the browser would otherwise
+  // start handling both concurrently — each loading the same saved
+  // ratchet state before the other has saved its update, corrupting
+  // the conversation state. This chain forces each message to fully
+  // finish (decrypt + save) before the next one starts.
+  let processingQueue = Promise.resolve();
+
+  ws.onmessage = (event) => {
+    processingQueue = processingQueue.then(() => handleIncoming(event)).catch((err) => {
+      console.error('Failed to process incoming message:', err);
+    });
+  };
+
+  async function handleIncoming(event) {
     const msg = JSON.parse(event.data);
     if (msg.type !== 'relay') return;
 

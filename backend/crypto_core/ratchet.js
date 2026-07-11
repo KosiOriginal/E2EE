@@ -1,63 +1,66 @@
 'use strict';
 /**
- * ratchet.js — Simplified Double Ratchet.
+ * ratchet_browser.js — Double ratchet using the Web Crypto API
+ * (works identically in the browser and here in Node, since Node
+ * exposes the same standard `crypto.subtle` interface for testing).
  *
- * Derives a brand new encryption key for every message, then deletes
- * the old one. A device compromised today can't decrypt yesterday's
- * messages (forward secrecy). Also tolerates out-of-order delivery,
- * which happens constantly in mesh networks (messages take different
- * relay paths).
- *
- * NOTE: this is the symmetric-key ratchet only (no periodic DH
- * ratchet step for post-compromise healing). Fine for prototyping;
- * flagged in the README as a follow-up for a production version.
+ * Browser crypto is promise-based, so every function here is async —
+ * that's the only real difference from the server-side version.
  */
 
-const crypto = require('crypto');
+async function chainStep(chainKeyBytes) {
+  const baseKey = await crypto.subtle.importKey('raw', chainKeyBytes, 'HKDF', false, ['deriveBits']);
 
-function chainStep(chainKey) {
-  const nextChainKey = Buffer.from(
-    crypto.hkdfSync('sha256', chainKey, Buffer.alloc(32, 0), Buffer.from('chain-key'), 32)
+  const nextChainKeyBits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('chain-key') },
+    baseKey,
+    256
   );
-  const messageKey = Buffer.from(
-    crypto.hkdfSync('sha256', chainKey, Buffer.alloc(32, 0), Buffer.from('message-key'), 32)
+  const messageKeyBits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('message-key') },
+    baseKey,
+    256
   );
-  return { nextChainKey, messageKey };
+
+  return {
+    nextChainKey: new Uint8Array(nextChainKeyBits),
+    messageKey: new Uint8Array(messageKeyBits),
+  };
 }
 
-class Ratchet {
-  constructor(sharedSecret) {
-    this.chainKey = sharedSecret;
+class RatchetBrowser {
+  constructor(sharedSecretBytes) {
+    this.chainKey = sharedSecretBytes;
     this.messageCount = 0;
-    this.skippedKeys = new Map(); // index -> messageKey, for out-of-order arrivals
+    this.skippedKeys = new Map();
   }
 
-  encrypt(plaintext, associatedData = Buffer.alloc(0)) {
-    const { nextChainKey, messageKey } = chainStep(this.chainKey);
-    this.chainKey = nextChainKey; // old key is gone — forward secrecy
+  async encrypt(plaintextBytes, associatedDataBytes = new Uint8Array(0)) {
+    const { nextChainKey, messageKey } = await chainStep(this.chainKey);
+    this.chainKey = nextChainKey; // old key discarded — forward secrecy
     const index = this.messageCount++;
 
-    const nonce = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', messageKey, nonce);
-    cipher.setAAD(associatedData);
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const authTag = cipher.getAuthTag();
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const aesKey = await crypto.subtle.importKey('raw', messageKey, 'AES-GCM', false, ['encrypt']);
+    const ciphertextBuf = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: associatedDataBytes },
+      aesKey,
+      plaintextBytes
+    );
 
-    return { index, nonce, ciphertext, authTag };
+    return { index, nonce, ciphertext: new Uint8Array(ciphertextBuf) };
   }
 
-  decrypt(packet, associatedData = Buffer.alloc(0)) {
-    const { index, nonce, ciphertext, authTag } = packet;
+  async decrypt(packet, associatedDataBytes = new Uint8Array(0)) {
+    const { index, nonce, ciphertext } = packet;
     let messageKey;
 
     if (this.skippedKeys.has(index)) {
       messageKey = this.skippedKeys.get(index);
       this.skippedKeys.delete(index);
     } else {
-      // advance the chain until we reach this message's index,
-      // stashing skipped keys for messages that arrive later
       while (this.messageCount <= index) {
-        const { nextChainKey, messageKey: mk } = chainStep(this.chainKey);
+        const { nextChainKey, messageKey: mk } = await chainStep(this.chainKey);
         this.chainKey = nextChainKey;
         this.skippedKeys.set(this.messageCount, mk);
         this.messageCount++;
@@ -66,26 +69,45 @@ class Ratchet {
       this.skippedKeys.delete(index);
     }
 
-    const decipher = crypto.createDecipheriv('aes-256-gcm', messageKey, nonce);
-    decipher.setAAD(associatedData);
-    decipher.setAuthTag(authTag);
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    if (!messageKey) {
+      throw new Error(`No key available for message index ${index} — likely a duplicate or already-consumed message`);
+    }
+
+    const aesKey = await crypto.subtle.importKey('raw', messageKey, 'AES-GCM', false, ['decrypt']);
+    const plaintextBuf = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: associatedDataBytes },
+      aesKey,
+      ciphertext
+    );
+    return new Uint8Array(plaintextBuf);
+  }
+
+  // --- Persistence: save/restore state across page reloads ---
+  // Without this, refreshing the page would create a brand new
+  // ratchet seeded from scratch, out of sync with whatever index
+  // the other person's ratchet has already reached — this is very
+  // likely the cause of "messages don't show right" after a reload.
+  toJSON() {
+    return {
+      chainKey: b64(this.chainKey),
+      messageCount: this.messageCount,
+      skippedKeys: [...this.skippedKeys.entries()].map(([idx, key]) => [idx, b64(key)]),
+    };
+  }
+
+  static fromJSON(obj) {
+    const r = new RatchetBrowser(unb64(obj.chainKey));
+    r.messageCount = obj.messageCount;
+    r.skippedKeys = new Map(obj.skippedKeys.map(([idx, key]) => [idx, unb64(key)]));
+    return r;
   }
 }
 
-module.exports = { Ratchet };
-
-if (require.main === module) {
-  const sharedSecret = crypto.randomBytes(32); // in real use: output of handshake.js
-
-  const aliceRatchet = new Ratchet(sharedSecret);
-  const bobRatchet = new Ratchet(sharedSecret);
-
-  const messages = ['hey', 'is this thing secure?', 'cool, testing forward secrecy'];
-  const packets = messages.map((m) => aliceRatchet.encrypt(Buffer.from(m, 'utf8')));
-
-  console.log('Decrypting out of order (index 2 first):');
-  console.log(' ', bobRatchet.decrypt(packets[2]).toString('utf8'));
-  console.log(' ', bobRatchet.decrypt(packets[0]).toString('utf8'));
-  console.log(' ', bobRatchet.decrypt(packets[1]).toString('utf8'));
+function b64(bytes) {
+  return btoa(String.fromCharCode(...bytes));
 }
+function unb64(str) {
+  return new Uint8Array(atob(str).split('').map((c) => c.charCodeAt(0)));
+}
+
+window.SecnetRatchet = { RatchetBrowser };
