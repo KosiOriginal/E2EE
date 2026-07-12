@@ -218,8 +218,8 @@ function connectWebSocket() {
   ws.onerror = () => ws.close();
 
   ws.onmessage = (event) => {
-    enqueue(() => handleIncoming(event)).catch(() => {
-      showError('Failed to process an incoming message.');
+    enqueue(() => handleIncoming(event)).catch((err) => {
+      showError('Incoming message error: ' + (err && err.message ? err.message : String(err)));
     });
   };
 }
@@ -296,6 +296,10 @@ async function sendText() {
   el('messageInput').value = '';
 
   try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error('Not connected to the server right now — wait for reconnect and try again.');
+    }
+
     await enqueue(async () => {
       const ratchet = getRatchet(fingerprint);
       if (!ratchet) throw new Error('No secure session with this contact yet.');
@@ -321,6 +325,10 @@ async function sendFile(file, mediaType) {
   const fingerprint = activeFingerprint;
 
   try {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error('Not connected to the server right now — wait for reconnect and try again.');
+    }
+
     const bytes = new Uint8Array(await file.arrayBuffer());
 
     await enqueue(async () => {
@@ -335,6 +343,10 @@ async function sendFile(file, mediaType) {
       // proxy message-size limits and connection instability on
       // larger files.
       for (let i = 0; i < totalChunks; i++) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          throw new Error(`Connection dropped mid-transfer (chunk ${i + 1}/${totalChunks}) — try sending again.`);
+        }
+
         const raw = bytes.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const aad = new TextEncoder().encode(`${mediaId}:${mediaType}`);
         const packet = await ratchet.encrypt(raw, aad);
