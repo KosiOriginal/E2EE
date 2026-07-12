@@ -17,7 +17,24 @@ function loadContacts() {
 }
 
 function saveContacts(contacts) {
-  localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
+  try {
+    localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
+  } catch (err) {
+    console.error('Storage full — dropping oldest media message to make room:', err);
+    for (const fp of Object.keys(contacts)) {
+      const msgs = contacts[fp].messages;
+      const idx = msgs.findIndex((m) => m.kind !== 'text');
+      if (idx !== -1) {
+        msgs.splice(idx, 1);
+        break;
+      }
+    }
+    try {
+      localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
+    } catch (err2) {
+      console.error('Still could not save contacts — storage is critically full:', err2);
+    }
+  }
 }
 
 function addContact(fingerprint, name, publicKeyB64) {

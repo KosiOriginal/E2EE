@@ -335,7 +335,7 @@ async function sendFile(file, mediaType) {
       const ratchet = getRatchet(fingerprint);
       if (!ratchet) throw new Error('No secure session with this contact yet.');
 
-      const CHUNK_SIZE = 16000;
+      const CHUNK_SIZE = 8000;
       const mediaId = await sha256Hex(bytes);
       const totalChunks = Math.ceil(bytes.length / CHUNK_SIZE) || 1;
 

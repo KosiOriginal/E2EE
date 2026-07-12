@@ -9,7 +9,7 @@
  */
 
 async function chainStep(chainKeyBytes) {
-  const baseKey = await crypto.subtle.importKey('raw', chainKeyBytes, 'HKDF', false, ['deriveBits']);
+  const baseKey = await crypto.subtle.importKey('raw', chainKeyBytes, { name: 'HKDF' }, false, ['deriveBits']);
 
   const nextChainKeyBits = await crypto.subtle.deriveBits(
     { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('chain-key') },
@@ -41,7 +41,7 @@ class RatchetBrowser {
     const index = this.messageCount++;
 
     const nonce = crypto.getRandomValues(new Uint8Array(12));
-    const aesKey = await crypto.subtle.importKey('raw', messageKey, 'AES-GCM', false, ['encrypt']);
+    const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['encrypt']);
     const ciphertextBuf = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv: nonce, additionalData: associatedDataBytes },
       aesKey,
@@ -69,7 +69,7 @@ class RatchetBrowser {
       this.skippedKeys.delete(index);
     }
 
-    const aesKey = await crypto.subtle.importKey('raw', messageKey, 'AES-GCM', false, ['decrypt']);
+    const aesKey = await crypto.subtle.importKey('raw', messageKey, { name: 'AES-GCM' }, false, ['decrypt']);
     const plaintextBuf = await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv: nonce, additionalData: associatedDataBytes },
       aesKey,

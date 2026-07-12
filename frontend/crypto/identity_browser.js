@@ -58,7 +58,7 @@ async function deriveSharedSecret(mySecretKey, theirPublicKey) {
 
   // Run through HKDF for domain separation — never use a raw DH
   // output directly as a key.
-  const baseKey = await crypto.subtle.importKey('raw', rawShared, 'HKDF', false, ['deriveBits']);
+  const baseKey = await crypto.subtle.importKey('raw', rawShared, { name: 'HKDF' }, false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits(
     { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('secnet-direct-dh') },
     baseKey,

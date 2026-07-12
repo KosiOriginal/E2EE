@@ -128,6 +128,8 @@ const connectedClients = new Map(); // fingerprint -> ws (only live, in-memory â
 
 wss.on('connection', (ws) => {
   let myFingerprint = null;
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
     let msg;
@@ -140,19 +142,43 @@ wss.on('connection', (ws) => {
     if (msg.type === 'register') {
       myFingerprint = msg.fingerprint;
       console.log(`[register] ${myFingerprint}`);
+
+      // If an old (possibly dead) socket is still registered for this
+      // fingerprint, kill it â€” otherwise messages can get routed to a
+      // stale connection and silently vanish instead of being queued.
+      const existing = connectedClients.get(myFingerprint);
+      if (existing && existing !== ws) {
+        try { existing.terminate(); } catch {}
+      }
+
+      ws.isAlive = true;
       connectedClients.set(myFingerprint, ws);
       console.log(`[connected clients]`, [...connectedClients.keys()]);
       flushMailbox(myFingerprint, ws);
       return;
     }
 
+    if (msg.type === 'ping') {
+      ws.isAlive = true;
+      return;
+    }
+
     if (msg.type === 'relay') {
       console.log(`[relay attempt] from=${myFingerprint} to=${msg.to}`);
       const recipientWs = connectedClients.get(msg.to);
+      let delivered = false;
+
       if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
-        console.log(`[relay] recipient online, delivering directly`);
-        recipientWs.send(JSON.stringify({ type: 'relay', from: myFingerprint, packet: msg.packet }));
-      } else {
+        try {
+          recipientWs.send(JSON.stringify({ type: 'relay', from: myFingerprint, packet: msg.packet }));
+          delivered = true;
+          console.log(`[relay] recipient online, delivered directly`);
+        } catch (err) {
+          console.log(`[relay] send to recipient failed (${err.message}), falling back to queue`);
+        }
+      }
+
+      if (!delivered) {
         console.log(`[relay] recipient NOT connected, queuing. Known clients:`, [...connectedClients.keys()]);
         queueMessage(msg.to, myFingerprint, msg.packet);
       }
@@ -161,9 +187,22 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (myFingerprint) {
+    if (myFingerprint && connectedClients.get(myFingerprint) === ws) {
       console.log(`[disconnect] ${myFingerprint}`);
       connectedClients.delete(myFingerprint);
     }
   });
 });
+
+// Detect dead connections (network drop without a clean close) and
+// terminate them so reconnects register cleanly and relays fall back
+// to the mailbox instead of being sent into a socket that's already dead.
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+wss.on('close', () => clearInterval(heartbeatInterval));
