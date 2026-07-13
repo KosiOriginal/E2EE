@@ -153,9 +153,14 @@ function openContact(fingerprint) {
   el('activeContactName').textContent = contact.name;
   el('activeContactFingerprint').textContent = fingerprint;
   el('chatPanel').style.display = 'block';
+  document.body.classList.add('chat-open'); // mobile: switch from contact list to chat screen
 
   renderChatLog(contact.messages);
   renderContactList();
+}
+
+function closeChat() {
+  document.body.classList.remove('chat-open'); // mobile: back to contact list
 }
 
 async function addContactFlow() {
@@ -409,6 +414,7 @@ window.addEventListener('DOMContentLoaded', () => {
   init();
 
   el('addContactBtn').addEventListener('click', addContactFlow);
+  el('backBtn').addEventListener('click', closeChat);
   el('sendBtn').addEventListener('click', sendText);
   el('messageInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendText();

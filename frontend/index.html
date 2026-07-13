@@ -6,40 +6,18 @@
 <title>TOTTALY NOT ILLEGAL WEBSITE FOR COMMUNICATING</title>
 <link rel="icon" href="/favicon.ico" type="favicon" />
 
-<style>
-  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 0; }
-  .layout { display: flex; height: 100vh; }
-  .sidebar { width: 260px; background: #1a1a1a; border-right: 1px solid #333; padding: 12px; box-sizing: border-box; overflow-y: auto; }
-  .main { flex: 1; padding: 16px; box-sizing: border-box; overflow-y: auto; }
-  h1 { font-size: 1.1rem; color: #7fd; margin-top: 0; }
-  .panel { background: #1c1c1c; border: 1px solid #333; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-  .mono { font-family: monospace; word-break: break-all; font-size: 0.8rem; color: #9cf; }
-  #status { color: #9f9; font-size: 0.85rem; margin-bottom: 10px; }
-  #chatLog { height: 300px; overflow-y: auto; background: #000; border-radius: 6px; padding: 8px; margin-bottom: 8px; }
-  .msg { margin-bottom: 8px; padding: 6px 8px; border-radius: 6px; max-width: 80%; }
-  .msg.me { background: #234; margin-left: auto; text-align: right; }
-  .msg.friend { background: #333; margin-right: auto; }
-  input[type=text] { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; box-sizing: border-box; margin-bottom: 6px; }
-  button { padding: 8px 12px; border-radius: 6px; border: none; background: #2a6; color: white; cursor: pointer; margin-top: 4px; }
-  button:hover { background: #3b7; }
-  .row { display: flex; gap: 8px; align-items: center; }
-  .row input[type=text] { flex: 1; margin-bottom: 0; }
-  .contact-item { padding: 8px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; }
-  .contact-item:hover { background: #2a2a2a; }
-  .contact-item.active { background: #2a6; color: white; }
-  #chatPanel { display: none; }
-</style>
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <div class="layout">
 
   <div class="sidebar">
-    <h1>🔒 secnet</h1>
+    <h1>TOTTALY NOT ILLEGAL WEBSITE FOR PRIVATE COMMUNICATING</h1>
 
     <div class="panel">
-      <div><strong>Your fingerprint</strong> (share/verify with friends):</div>
+      <div><strong>FINGERPRINT</strong> (share/verify with friends):</div>
       <div class="mono" id="myFingerprint">...</div>
-      <div style="margin-top:8px;"><strong>Your public key</strong> (share this so friends can add you):</div>
+      <div style="margin-top:8px;"><strong>PUBLIC KEY</strong> (share this so friends can add you):</div>
       <div class="mono" id="myPublicKey">...</div>
     </div>
 
@@ -60,6 +38,7 @@
     <div id="status">Connecting...</div>
 
     <div id="chatPanel" class="panel">
+      <button id="backBtn">← Contacts</button>
       <div><strong id="activeContactName"></strong></div>
       <div class="mono" id="activeContactFingerprint" style="margin-bottom:8px;"></div>
 
