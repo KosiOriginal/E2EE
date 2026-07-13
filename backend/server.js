@@ -66,18 +66,20 @@ const stmts = {
   deleteMailboxEntry: db.prepare('DELETE FROM mailbox WHERE id = ?'),
 };
 
-function queueMessage(recipientFingerprint, fromFingerprint, packet) {
-  stmts.queueMessage.run(recipientFingerprint, fromFingerprint, JSON.stringify(packet), Date.now());
+function queueMessage(recipientFingerprint, fromFingerprint, fromPublicKey, packet) {
+  stmts.queueMessage.run(recipientFingerprint, fromFingerprint, JSON.stringify({ fromPublicKey, packet }), Date.now());
 }
 
 function flushMailbox(fingerprint, ws) {
   const rows = stmts.getMailbox.all(fingerprint);
   for (const row of rows) {
-    // Same flat shape as live delivery below — from, packet, both present.
+    const stored = JSON.parse(row.packet_json);
+    // Same flat shape as live delivery below — from, fromPublicKey, packet all present.
     ws.send(JSON.stringify({
       type: 'relay',
       from: row.from_fingerprint,
-      packet: JSON.parse(row.packet_json),
+      fromPublicKey: stored.fromPublicKey,
+      packet: stored.packet,
     }));
     stmts.deleteMailboxEntry.run(row.id);
   }
@@ -170,7 +172,12 @@ wss.on('connection', (ws) => {
 
       if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
         try {
-          recipientWs.send(JSON.stringify({ type: 'relay', from: myFingerprint, packet: msg.packet }));
+          recipientWs.send(JSON.stringify({
+            type: 'relay',
+            from: myFingerprint,
+            fromPublicKey: msg.fromPublicKey,
+            packet: msg.packet,
+          }));
           delivered = true;
           console.log(`[relay] recipient online, delivered directly`);
         } catch (err) {
@@ -180,7 +187,7 @@ wss.on('connection', (ws) => {
 
       if (!delivered) {
         console.log(`[relay] recipient NOT connected, queuing. Known clients:`, [...connectedClients.keys()]);
-        queueMessage(msg.to, myFingerprint, msg.packet);
+        queueMessage(msg.to, myFingerprint, msg.fromPublicKey, msg.packet);
       }
       return;
     }
