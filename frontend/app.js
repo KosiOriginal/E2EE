@@ -101,14 +101,40 @@ function showError(message) {
 
 // ---- Rendering ----
 
+const unreadCounts = new Map(); // fingerprint -> count, in-memory only
+
 function renderContactList() {
   const list = el('contactList');
   list.innerHTML = '';
   for (const c of SecnetContacts.listContacts()) {
     const item = document.createElement('div');
     item.className = 'contact-item' + (c.fingerprint === activeFingerprint ? ' active' : '');
-    item.textContent = c.name;
+
+    const nameSpan = document.createElement('span');
+    const unread = unreadCounts.get(c.fingerprint);
+    nameSpan.textContent = unread ? `${c.name} (${unread})` : c.name;
+    item.appendChild(nameSpan);
     item.addEventListener('click', () => openContact(c.fingerprint));
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '\u2715';
+    delBtn.title = 'Delete contact';
+    delBtn.style.marginLeft = '8px';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete ${c.name}? This removes your conversation history and ratchet state.`)) return;
+      SecnetContacts.removeContact(c.fingerprint);
+      ratchetCache.delete(c.fingerprint);
+      unreadCounts.delete(c.fingerprint);
+      if (activeFingerprint === c.fingerprint) {
+        activeFingerprint = null;
+        el('chatPanel').style.display = 'none';
+        closeChat();
+      }
+      renderContactList();
+    });
+    item.appendChild(delBtn);
+
     list.appendChild(item);
   }
 }
@@ -154,6 +180,18 @@ function addAndRenderMessage(fingerprint, message) {
   if (fingerprint === activeFingerprint) {
     renderOneMessage(message);
     el('chatLog').scrollTop = el('chatLog').scrollHeight;
+  } else if (message.who === 'friend') {
+    // Chat with this contact isn't open right now — surface a
+    // notification instead of the message silently landing unseen.
+    unreadCounts.set(fingerprint, (unreadCounts.get(fingerprint) || 0) + 1);
+    renderContactList();
+    flashTitle();
+    const contact = SecnetContacts.getContact(fingerprint);
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      try {
+        new Notification('secnet', { body: `New message from ${contact ? contact.name : fingerprint}` });
+      } catch {}
+    }
   }
 }
 
@@ -169,6 +207,7 @@ function openContact(fingerprint) {
   el('chatPanel').style.display = 'flex';
   document.body.classList.add('chat-open'); // mobile: switch from contact list to chat screen
   stopFlashingTitle();
+  unreadCounts.delete(fingerprint);
 
   renderChatLog(contact.messages);
   renderContactList();
@@ -290,7 +329,13 @@ async function processPayload(fromFingerprint, ratchet, payload) {
     }
     const buffer = incomingMediaBuffers.get(mediaId);
     const packet = packetFromJSON(payload.packet);
-    const plaintextChunk = await ratchet.decrypt(packet, new TextEncoder().encode(`${mediaId}:${mediaType}`));
+    let plaintextChunk;
+    try {
+      plaintextChunk = await ratchet.decrypt(packet, new TextEncoder().encode(`${mediaId}:${mediaType}`));
+    } catch (cryptoErr) {
+      incomingMediaBuffers.delete(mediaId);
+      throw new Error(`Could not decrypt chunk ${chunkIndex + 1}/${totalChunks} of incoming ${mediaType} — connection likely dropped mid-transfer, ask them to resend.`);
+    }
     persistRatchet(fromFingerprint);
     buffer.chunks.set(chunkIndex, plaintextChunk);
 
@@ -522,14 +567,36 @@ async function sendFile(file, mediaType) {
       // Each chunk is its OWN WebSocket message, not bundled — avoids
       // proxy message-size limits and connection instability on
       // larger files.
+      //
+      // Flow control: firing all chunks in a tight loop lets the
+      // browser's outgoing WS buffer (bufferedAmount) pile up faster
+      // than the network drains it. That's what causes the 30-60s
+      // stalls on slow links, and on some hosts/proxies a backed-up
+      // socket starts dropping frames — which shows up on the
+      // receiving end as a SubtleCrypto decrypt error (the arriving
+      // chunk is corrupt/incomplete, not actually a crypto bug).
+      // Waiting for the buffer to drain before each send fixes both.
+      const MAX_BUFFERED = 256 * 1024; // 256KB
       for (let i = 0; i < totalChunks; i++) {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
           throw new Error(`Connection dropped mid-transfer (chunk ${i + 1}/${totalChunks}) — try sending again.`);
         }
 
+        while (ws.bufferedAmount > MAX_BUFFERED) {
+          await new Promise((r) => setTimeout(r, 50));
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            throw new Error(`Connection dropped mid-transfer (chunk ${i + 1}/${totalChunks}) — try sending again.`);
+          }
+        }
+
         const raw = bytes.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const aad = new TextEncoder().encode(`${mediaId}:${mediaType}`);
-        const packet = await ratchet.encrypt(raw, aad);
+        let packet;
+        try {
+          packet = await ratchet.encrypt(raw, aad);
+        } catch (cryptoErr) {
+          throw new Error(`Encryption failed on chunk ${i + 1}/${totalChunks}: ${cryptoErr.message}`);
+        }
         persistRatchet(fingerprint);
 
         ws.send(JSON.stringify({
