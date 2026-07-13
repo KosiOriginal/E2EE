@@ -253,10 +253,16 @@ async function handleIncoming(event) {
   }
 
   if (payload.kind === 'media_chunk') {
-    const { mediaId, mediaType, chunkIndex, totalChunks } = payload;
+    const { mediaId, mediaType, chunkIndex, totalChunks, mime } = payload;
 
     if (!incomingMediaBuffers.has(mediaId)) {
-      incomingMediaBuffers.set(mediaId, { mediaType, totalChunks, fromFingerprint, chunks: new Map() });
+      incomingMediaBuffers.set(mediaId, {
+        mediaType,
+        mime: mime || (mediaType === 'image' ? 'image/jpeg' : 'audio/webm'),
+        totalChunks,
+        fromFingerprint,
+        chunks: new Map(),
+      });
     }
     const buffer = incomingMediaBuffers.get(mediaId);
     const packet = packetFromJSON(payload.packet);
@@ -276,7 +282,7 @@ async function handleIncoming(event) {
       }
       incomingMediaBuffers.delete(mediaId);
 
-      const mimeType = mediaType === 'image' ? 'image/png' : 'audio/webm';
+      const mimeType = buffer.mime;
       const blob = new Blob([fileBytes], { type: mimeType });
       const url = await blobToDataURL(blob);
       addAndRenderMessage(fromFingerprint, { who: 'friend', kind: mediaType, content: url, ts: Date.now() });
@@ -335,6 +341,7 @@ async function sendFile(file, mediaType) {
     }
 
     const bytes = new Uint8Array(await file.arrayBuffer());
+    const mime = file.type || (mediaType === 'image' ? 'image/jpeg' : 'audio/webm');
 
     await enqueue(async () => {
       const ratchet = getRatchet(fingerprint);
@@ -364,6 +371,7 @@ async function sendFile(file, mediaType) {
             kind: 'media_chunk',
             mediaId,
             mediaType,
+            mime,
             chunkIndex: i,
             totalChunks,
             packet: packetToJSON(packet),
