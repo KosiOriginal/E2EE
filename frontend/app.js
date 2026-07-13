@@ -154,6 +154,7 @@ function openContact(fingerprint) {
   el('activeContactFingerprint').textContent = fingerprint;
   el('chatPanel').style.display = 'block';
   document.body.classList.add('chat-open'); // mobile: switch from contact list to chat screen
+  stopFlashingTitle();
 
   renderChatLog(contact.messages);
   renderContactList();
@@ -183,6 +184,7 @@ async function addContactFlow() {
     el('newContactKey').value = '';
     renderContactList();
     openContact(fingerprint);
+    await enqueue(() => replayPendingMessages(fingerprint));
   } catch (err) {
     showError('Could not add contact — check the public key was pasted correctly.');
   }
@@ -235,13 +237,22 @@ async function handleIncoming(event) {
 
   const fromFingerprint = msg.from;
   const contact = SecnetContacts.getContact(fromFingerprint);
-  if (!contact) return;
+
+  if (!contact) {
+    // We don't have a session with this sender yet. Save the encrypted
+    // packet (we can't read it without adding them) and let the user know.
+    stashPendingMessage(fromFingerprint, msg.fromPublicKey, msg.packet);
+    notifyUnknownSender(fromFingerprint);
+    return;
+  }
 
   const ratchet = getRatchet(fromFingerprint);
   if (!ratchet) return;
 
-  const payload = msg.packet;
+  await processPayload(fromFingerprint, ratchet, msg.packet);
+}
 
+async function processPayload(fromFingerprint, ratchet, payload) {
   if (payload.kind === 'text') {
     const packet = packetFromJSON(payload.packet);
     const plaintext = await ratchet.decrypt(packet);
@@ -290,13 +301,130 @@ async function handleIncoming(event) {
   }
 }
 
+// ---- Unknown senders: messages from people not yet in your contacts ----
+// We can't decrypt these (no ratchet exists yet), so we save the raw
+// encrypted packets and surface a notification + an "Add contact" prompt.
+// Once the contact is added, the stash is replayed and decrypted normally.
+
+const PENDING_KEY = 'secnet_pending_v1';
+
+function loadPending() {
+  const raw = localStorage.getItem(PENDING_KEY);
+  return raw ? JSON.parse(raw) : {};
+}
+function savePending(pending) {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+  } catch (err) {
+    console.error('Could not save pending message stash:', err);
+  }
+}
+
+function stashPendingMessage(fingerprint, fromPublicKey, payload) {
+  const pending = loadPending();
+  if (!pending[fingerprint]) pending[fingerprint] = { fromPublicKey: null, payloads: [] };
+  if (fromPublicKey) pending[fingerprint].fromPublicKey = fromPublicKey;
+  pending[fingerprint].payloads.push(payload);
+  savePending(pending);
+  renderUnknownSenders();
+}
+
+function renderUnknownSenders() {
+  const pending = loadPending();
+  const entries = Object.entries(pending);
+  const panel = el('unknownPanel');
+  const list = el('unknownList');
+  if (!panel || !list) return;
+
+  if (entries.length === 0) {
+    panel.style.display = 'none';
+    list.innerHTML = '';
+    return;
+  }
+
+  panel.style.display = 'block';
+  list.innerHTML = '';
+  for (const [fingerprint, data] of entries) {
+    const item = document.createElement('div');
+    item.className = 'contact-item';
+    item.textContent = `${fingerprint} (${data.payloads.length} msg${data.payloads.length > 1 ? 's' : ''})`;
+
+    const addBtn = document.createElement('button');
+    addBtn.textContent = 'Add contact';
+    addBtn.style.marginLeft = '8px';
+    addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      el('newContactKey').value = data.fromPublicKey || '';
+      el('newContactName').value = '';
+      el('newContactName').focus();
+    });
+
+    item.appendChild(addBtn);
+    list.appendChild(item);
+  }
+}
+
+async function replayPendingMessages(fingerprint) {
+  const pending = loadPending();
+  const entry = pending[fingerprint];
+  if (!entry) return;
+
+  const ratchet = getRatchet(fingerprint);
+  if (!ratchet) return;
+
+  for (const payload of entry.payloads) {
+    try {
+      await processPayload(fingerprint, ratchet, payload);
+    } catch (err) {
+      console.error('Could not decrypt a pending message — it may be corrupted:', err);
+    }
+  }
+
+  delete pending[fingerprint];
+  savePending(pending);
+  renderUnknownSenders();
+}
+
+function notifyUnknownSender(fingerprint) {
+  showError(`New message from an unknown contact (${fingerprint}) — add them to read it.`);
+  flashTitle();
+  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+    try {
+      new Notification('secnet', { body: `New message from an unknown contact: ${fingerprint}` });
+    } catch {}
+  }
+}
+
+let titleFlashInterval = null;
+const ORIGINAL_TITLE = document.title;
+function flashTitle() {
+  if (titleFlashInterval) return;
+  let on = false;
+  titleFlashInterval = setInterval(() => {
+    document.title = on ? ORIGINAL_TITLE : '🔔 New message!';
+    on = !on;
+  }, 1000);
+}
+function stopFlashingTitle() {
+  if (titleFlashInterval) {
+    clearInterval(titleFlashInterval);
+    titleFlashInterval = null;
+  }
+  document.title = ORIGINAL_TITLE;
+}
+
 async function init() {
   myIdentity = SecnetIdentity.loadOrCreateIdentity();
   myFingerprint = SecnetIdentity.fingerprint(myIdentity.publicKey);
   el('myFingerprint').textContent = myFingerprint;
   el('myPublicKey').textContent = SecnetIdentity.toB64(myIdentity.publicKey);
 
+  if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+
   renderContactList();
+  renderUnknownSenders();
   connectWebSocket();
 }
 
@@ -321,6 +449,7 @@ async function sendText() {
       ws.send(JSON.stringify({
         type: 'relay',
         to: fingerprint,
+        fromPublicKey: SecnetIdentity.toB64(myIdentity.publicKey),
         packet: { kind: 'text', packet: packetToJSON(packet) },
       }));
 
@@ -367,6 +496,7 @@ async function sendFile(file, mediaType) {
         ws.send(JSON.stringify({
           type: 'relay',
           to: fingerprint,
+          fromPublicKey: SecnetIdentity.toB64(myIdentity.publicKey),
           packet: {
             kind: 'media_chunk',
             mediaId,

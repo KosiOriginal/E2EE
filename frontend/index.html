@@ -9,15 +9,20 @@
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+
+<div class="marquee">
+  <div class="marquee-track">🔒 end-to-end encrypted &nbsp;•&nbsp; the server never sees your messages &nbsp;•&nbsp; verify fingerprints before you chat &nbsp;•&nbsp; secnet &nbsp;•&nbsp;</div>
+</div>
+
 <div class="layout">
 
   <div class="sidebar">
-    <h1>TOTTALY NOT ILLEGAL WEBSITE FOR PRIVATE COMMUNICATING</h1>
+    <h1>🔒 secnet</h1>
 
     <div class="panel">
-      <div><strong>FINGERPRINT</strong> (share/verify with friends):</div>
+      <div><strong>Your fingerprint</strong> (share/verify with friends):</div>
       <div class="mono" id="myFingerprint">...</div>
-      <div style="margin-top:8px;"><strong>PUBLIC KEY</strong> (share this so friends can add you):</div>
+      <div style="margin-top:8px;"><strong>Your public key</strong> (share this so friends can add you):</div>
       <div class="mono" id="myPublicKey">...</div>
     </div>
 
@@ -31,6 +36,12 @@
     <div class="panel">
       <div><strong>Contacts</strong></div>
       <div id="contactList"></div>
+    </div>
+
+    <div class="panel" id="unknownPanel" style="display:none;">
+      <div><strong>⚠️ Unknown senders</strong></div>
+      <div style="font-size:0.8rem;color:#999;margin-bottom:6px;">Messages from people not in your contacts yet.</div>
+      <div id="unknownList"></div>
     </div>
   </div>
 
