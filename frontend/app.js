@@ -74,14 +74,28 @@ function blobToDataURL(blob) {
   });
 }
 
+function setSignalState(state, text) {
+  const status = el('status');
+  status.dataset.state = state;
+  el('statusText').textContent = text;
+}
+
 function showError(message) {
   console.error(message);
   const status = el('status');
-  status.textContent = `⚠️ ${message}`;
-  status.style.color = '#f66';
+  const statusText = el('statusText');
+  const previousState = status.dataset.state;
+
+  statusText.textContent = message;
+  status.classList.add('status-error');
+
   setTimeout(() => {
-    status.style.color = '';
-    status.textContent = ws && ws.readyState === WebSocket.OPEN ? 'Connected to relay' : 'Disconnected — reconnecting...';
+    status.classList.remove('status-error');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      setSignalState('secure', 'Line secure');
+    } else {
+      setSignalState(previousState === 'lost' ? 'lost' : 'searching', 'Re-establishing link\u2026');
+    }
   }, 4000);
 }
 
@@ -152,7 +166,7 @@ function openContact(fingerprint) {
 
   el('activeContactName').textContent = contact.name;
   el('activeContactFingerprint').textContent = fingerprint;
-  el('chatPanel').style.display = 'block';
+  el('chatPanel').style.display = 'flex';
   document.body.classList.add('chat-open'); // mobile: switch from contact list to chat screen
   stopFlashingTitle();
 
@@ -206,8 +220,7 @@ function connectWebSocket() {
   ws.onopen = () => {
     reconnectAttempts = 0;
     ws.send(JSON.stringify({ type: 'register', fingerprint: myFingerprint }));
-    el('status').textContent = 'Connected to relay';
-    el('status').style.color = '';
+    setSignalState('secure', 'Line secure');
 
     clearInterval(heartbeatInterval);
     heartbeatInterval = setInterval(() => {
@@ -217,7 +230,7 @@ function connectWebSocket() {
 
   ws.onclose = () => {
     clearInterval(heartbeatInterval);
-    el('status').textContent = 'Disconnected — reconnecting...';
+    setSignalState('searching', 'Re-establishing link\u2026');
     reconnectAttempts++;
     setTimeout(connectWebSocket, Math.min(1000 * reconnectAttempts, 8000));
   };
@@ -413,6 +426,30 @@ function stopFlashingTitle() {
   document.title = ORIGINAL_TITLE;
 }
 
+// ---- Theme (Settings > Theme) ----
+
+const THEME_KEY = 'secnet_theme_v1';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch (err) {
+    console.error('Could not save theme choice:', err);
+  }
+  document.querySelectorAll('.theme-swatch').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.themeOption === theme);
+  });
+}
+
+function initTheme() {
+  let saved = 'field';
+  try {
+    saved = localStorage.getItem(THEME_KEY) || 'field';
+  } catch {}
+  applyTheme(saved);
+}
+
 async function init() {
   myIdentity = SecnetIdentity.loadOrCreateIdentity();
   myFingerprint = SecnetIdentity.fingerprint(myIdentity.publicKey);
@@ -423,8 +460,10 @@ async function init() {
     Notification.requestPermission();
   }
 
+  initTheme();
   renderContactList();
   renderUnknownSenders();
+  setSignalState('searching', 'Searching for link\u2026');
   connectWebSocket();
 }
 
@@ -554,6 +593,9 @@ window.addEventListener('DOMContentLoaded', () => {
   el('addContactBtn').addEventListener('click', addContactFlow);
   el('backBtn').addEventListener('click', closeChat);
   el('sendBtn').addEventListener('click', sendText);
+  document.querySelectorAll('.theme-swatch').forEach((btn) => {
+    btn.addEventListener('click', () => applyTheme(btn.dataset.themeOption));
+  });
   el('messageInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendText();
   });

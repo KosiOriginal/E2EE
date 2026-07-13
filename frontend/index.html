@@ -5,65 +5,105 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>TOTTALY NOT ILLEGAL WEBSITE FOR COMMUNICATING</title>
 <link rel="icon" href="/favicon.ico" type="favicon" />
+<script>
+  // Applied before CSS renders so switching themes doesn't flash the default on reload.
+  (function () {
+    try {
+      var saved = localStorage.getItem('secnet_theme_v1');
+      if (saved) document.documentElement.setAttribute('data-theme', saved);
+    } catch (e) {}
+  })();
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Special+Elite&family=IBM+Plex+Mono:wght@400;500;600&family=Work+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
 
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
 <div class="marquee">
-  <div class="marquee-track">🔒 end-to-end encrypted &nbsp;•&nbsp; the server never sees your messages &nbsp;•&nbsp; verify fingerprints before you chat &nbsp;•&nbsp; secnet &nbsp;•&nbsp;</div>
+  <div class="marquee-track">END-TO-END ENCRYPTED &nbsp;&middot;&nbsp; IDFK em pleh &nbsp;&middot;&nbsp; VERIFY FINGERPRINTS BEFORE YOU TALK &nbsp;&middot;&nbsp; 100% NOT SCAM , NOT LEAKING DATA (prob)&nbsp;&middot;&nbsp; TNIWPC tm &nbsp;&middot;&nbsp;</div>
 </div>
 
 <div class="layout">
 
   <div class="sidebar">
-    <h1>🔒 secnet</h1>
-
-    <div class="panel">
-      <div><strong>Your fingerprint</strong> (share/verify with friends):</div>
-      <div class="mono" id="myFingerprint">...</div>
-      <div style="margin-top:8px;"><strong>Your public key</strong> (share this so friends can add you):</div>
-      <div class="mono" id="myPublicKey">...</div>
+    <div class="brand">
+      <div class="brand-eyebrow">Field Terminal</div>
+      <h1 class="brand-name">TOTALLY NOT ILLEGAL WEBSITE FOR PRIVATE COMMUNICATING</h1>
     </div>
 
     <div class="panel">
-      <div><strong>Add a contact</strong></div>
-      <input type="text" id="newContactName" placeholder="Name (e.g. Alex)" />
-      <input type="text" id="newContactKey" placeholder="Paste their public key" />
+      <div class="panel-label">Your identity</div>
+      <div class="field-row">
+        <span class="field-tag">Fingerprint</span>
+        <div class="mono value-block" id="myFingerprint">...</div>
+      </div>
+      <div class="field-row">
+        <span class="field-tag">Public key</span>
+        <div class="mono value-block" id="myPublicKey">...</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-label">New contact</div>
+      <input type="text" id="newContactName" placeholder="Name" />
+      <input type="text" id="newContactKey" placeholder="Their public key" />
       <button id="addContactBtn">Add contact</button>
     </div>
 
     <div class="panel">
-      <div><strong>Contacts</strong></div>
+      <div class="panel-label">Contacts</div>
       <div id="contactList"></div>
     </div>
 
-    <div class="panel" id="unknownPanel" style="display:none;">
-      <div><strong>⚠️ Unknown senders</strong></div>
-      <div style="font-size:0.8rem;color:#999;margin-bottom:6px;">Messages from people not in your contacts yet.</div>
+    <div class="panel panel-alert" id="unknownPanel" style="display:none;">
+      <div class="panel-label panel-label-alert">Unidentified senders</div>
+      <div class="panel-note">Messages from people not in your contacts yet.</div>
       <div id="unknownList"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-label">Theme</div>
+      <div class="theme-grid" id="themeGrid">
+        <button class="theme-swatch theme-swatch--field" data-theme-option="field" type="button">Field</button>
+        <button class="theme-swatch theme-swatch--cobalt" data-theme-option="cobalt" type="button">Cobalt</button>
+        <button class="theme-swatch theme-swatch--graphite" data-theme-option="graphite" type="button">Graphite</button>
+        <button class="theme-swatch theme-swatch--crimson" data-theme-option="crimson" type="button">Crimson</button>
+      </div>
     </div>
   </div>
 
   <div class="main">
-    <div id="status">Connecting...</div>
+    <div id="status" class="signal" data-state="searching">
+      <svg class="signal-meter" viewBox="0 0 60 34" aria-hidden="true">
+        <path class="dial" d="M4 30 A26 26 0 0 1 56 30" fill="none" stroke-width="2" />
+        <line class="needle" x1="30" y1="30" x2="30" y2="9" stroke-width="2" />
+        <circle class="pivot" cx="30" cy="30" r="2.4" />
+      </svg>
+      <span id="statusText">Searching for link&hellip;</span>
+    </div>
 
-    <div id="chatPanel" class="panel">
-      <button id="backBtn">← Contacts</button>
-      <div><strong id="activeContactName"></strong></div>
-      <div class="mono" id="activeContactFingerprint" style="margin-bottom:8px;"></div>
+    <div id="chatPanel" class="panel chat-panel">
+      <button id="backBtn">&larr; Contacts</button>
+      <div class="chat-header">
+        <strong id="activeContactName"></strong>
+        <div class="mono value-block" id="activeContactFingerprint"></div>
+      </div>
 
       <div id="chatLog"></div>
       <div class="row">
-        <input type="text" id="messageInput" placeholder="Type a message..." />
+        <input type="text" id="messageInput" placeholder="Type your message&hellip;" />
         <button id="sendBtn">Send</button>
       </div>
-      <div class="row" style="margin-top:8px;">
-        <label style="cursor:pointer;">
-          📷 Send image
+      <div class="row toolbelt">
+        <label class="file-label">
+          Send image
           <input type="file" id="imageInput" accept="image/*" style="display:none;" />
         </label>
-        <button id="recordBtn">🎙 Record voice note</button>
+        <button id="recordBtn">Record voice note</button>
       </div>
     </div>
   </div>
