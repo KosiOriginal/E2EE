@@ -104,10 +104,23 @@
           <input type="file" id="imageInput" accept="image/*" style="display:none;" />
         </label>
         <button id="recordBtn">Record voice note</button>
+        <button id="callBtn">Voice call</button>
+        <button id="endCallBtn" style="display:none;">End call</button>
+        <span id="callStatus" class="mono" style="display:none;"></span>
       </div>
+      <audio id="remoteAudio" autoplay style="display:none;"></audio>
     </div>
   </div>
 
+</div>
+
+<div id="incomingCallBanner" class="panel panel-alert call-banner" style="display:none;">
+  <div class="panel-label panel-label-alert">Incoming call</div>
+  <div id="incomingCallFrom" class="panel-note"></div>
+  <div class="row">
+    <button id="acceptCallBtn">Accept</button>
+    <button id="declineCallBtn">Decline</button>
+  </div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl.min.js"></script>

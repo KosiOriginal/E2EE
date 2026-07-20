@@ -356,6 +356,26 @@ async function processPayload(fromFingerprint, ratchet, payload) {
       const url = await blobToDataURL(blob);
       addAndRenderMessage(fromFingerprint, { who: 'friend', kind: mediaType, content: url, ts: Date.now() });
     }
+    return;
+  }
+
+  if (typeof payload.kind === 'string' && payload.kind.startsWith('call_')) {
+    const subkind = payload.kind.slice(5); // 'offer' | 'answer' | 'ice' | 'end'
+    const packet = packetFromJSON(payload.packet);
+    let plaintext;
+    try {
+      plaintext = await ratchet.decrypt(packet, callAad(subkind));
+    } catch (cryptoErr) {
+      console.error('Could not decrypt call signal:', cryptoErr);
+      return;
+    }
+    persistRatchet(fromFingerprint);
+    const data = JSON.parse(new TextDecoder().decode(plaintext));
+
+    if (subkind === 'offer') return handleIncomingOffer(fromFingerprint, data);
+    if (subkind === 'answer') return handleIncomingAnswer(fromFingerprint, data);
+    if (subkind === 'ice') return handleIncomingIce(fromFingerprint, data);
+    if (subkind === 'end') return handleIncomingEnd(fromFingerprint);
   }
 }
 
@@ -508,6 +528,7 @@ async function init() {
   initTheme();
   renderContactList();
   renderUnknownSenders();
+  setCallUIState('idle', '');
   setSignalState('searching', 'Searching for link\u2026');
   connectWebSocket();
 }
@@ -620,6 +641,291 @@ async function sendFile(file, mediaType) {
     });
   } catch (err) {
     showError('File failed to send: ' + err.message);
+  }
+}
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+}
+
+// ---- Voice calls (WebRTC, signaling relayed as encrypted packets) ----
+//
+// WebRTC media itself is always protected end-to-end by mandatory
+// DTLS-SRTP, regardless of who relays the signaling. We additionally
+// encrypt the SDP offers/answers/ICE candidates with the same ratchet
+// used for messages, so the relay server — which already can't read
+// chat content — also can't see call metadata (who's calling whom).
+//
+// LIMITATION: only a public STUN server is configured, no TURN. Calls
+// between two people who are both behind strict/symmetric NATs may
+// fail to connect — that needs a TURN relay, which isn't set up here.
+// Works fine for most home wifi / mobile connections.
+//
+// LIMITATION: getUserMedia/RTCPeerConnection require a secure context
+// (HTTPS, or localhost). If server.js fell back to plain HTTP because
+// key.pem/cert.pem are missing, calls will fail to even request the
+// microphone — that's a browser restriction, not a bug here.
+
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+let currentCall = null; // { fingerprint, pc, localStream, role: 'caller'|'callee', pendingOffer? }
+
+function callAad(subkind) {
+  return new TextEncoder().encode(`call:${subkind}`);
+}
+
+async function sendCallSignal(fingerprint, subkind, data) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('Not connected to the server right now.');
+  await enqueue(async () => {
+    const ratchet = getRatchet(fingerprint);
+    if (!ratchet) throw new Error('No secure session with this contact yet.');
+    const bytes = new TextEncoder().encode(JSON.stringify(data));
+    const packet = await ratchet.encrypt(bytes, callAad(subkind));
+    persistRatchet(fingerprint);
+    ws.send(JSON.stringify({
+      type: 'relay',
+      to: fingerprint,
+      fromPublicKey: SecnetIdentity.toB64(myIdentity.publicKey),
+      packet: { kind: `call_${subkind}`, packet: packetToJSON(packet) },
+    }));
+  });
+}
+
+function setCallUIState(state, label) {
+  // state: 'idle' | 'calling' | 'active'
+  const callBtn = el('callBtn');
+  const endBtn = el('endCallBtn');
+  const status = el('callStatus');
+  if (!callBtn || !endBtn || !status) return;
+  const busy = state !== 'idle';
+  callBtn.style.display = busy ? 'none' : 'inline-block';
+  endBtn.style.display = busy ? 'inline-block' : 'none';
+  status.style.display = busy ? 'inline' : 'none';
+  status.textContent = label || '';
+}
+
+function createPeerConnection(fingerprint) {
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      sendCallSignal(fingerprint, 'ice', { candidate: e.candidate }).catch((err) => {
+        console.error('Could not send ICE candidate:', err);
+      });
+    }
+  };
+
+  pc.ontrack = (e) => {
+    const audio = el('remoteAudio');
+    if (audio) audio.srcObject = e.streams[0];
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (!currentCall || currentCall.pc !== pc) return;
+    if (pc.connectionState === 'connected') {
+      const contact = SecnetContacts.getContact(fingerprint);
+      setCallUIState('active', 'On call \u2014 ' + (contact ? contact.name : fingerprint));
+    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+      endCall(fingerprint, false);
+    }
+  };
+
+  return pc;
+}
+
+async function startCall(fingerprint) {
+  if (!fingerprint) return;
+  if (currentCall) {
+    showError('Already in a call \u2014 end it before starting another.');
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showError('Not connected to the server right now \u2014 wait for reconnect and try again.');
+    return;
+  }
+  const contact = SecnetContacts.getContact(fingerprint);
+  if (!contact) return;
+
+  try {
+    const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const pc = createPeerConnection(fingerprint);
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+
+    currentCall = { fingerprint, pc, localStream, role: 'caller' };
+    setCallUIState('calling', 'Calling ' + contact.name + '\u2026');
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await sendCallSignal(fingerprint, 'offer', { sdp: offer });
+  } catch (err) {
+    showError('Could not start call: ' + err.message);
+    endCall(fingerprint, false);
+  }
+}
+
+function showIncomingCallBanner(fingerprint) {
+  const contact = SecnetContacts.getContact(fingerprint);
+  el('incomingCallFrom').textContent = contact ? contact.name : fingerprint;
+  el('incomingCallBanner').style.display = 'block';
+  el('incomingCallBanner').dataset.fingerprint = fingerprint;
+  flashTitle();
+}
+function hideIncomingCallBanner() {
+  el('incomingCallBanner').style.display = 'none';
+  delete el('incomingCallBanner').dataset.fingerprint;
+}
+
+function handleIncomingOffer(fromFingerprint, data) {
+  if (currentCall) {
+    // Busy with another call — decline quietly instead of leaving them hanging.
+    sendCallSignal(fromFingerprint, 'end', { reason: 'busy' }).catch(() => {});
+    return;
+  }
+  const contact = SecnetContacts.getContact(fromFingerprint);
+  if (!contact) return; // same rule as messages: must be an added contact to interact
+
+  currentCall = { fingerprint: fromFingerprint, pc: null, localStream: null, role: 'callee', pendingOffer: data.sdp };
+  showIncomingCallBanner(fromFingerprint);
+}
+
+async function acceptCall() {
+  const fingerprint = el('incomingCallBanner').dataset.fingerprint;
+  if (!fingerprint || !currentCall || currentCall.fingerprint !== fingerprint) return;
+  hideIncomingCallBanner();
+  stopFlashingTitle();
+
+  try {
+    const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const pc = createPeerConnection(fingerprint);
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+
+    await pc.setRemoteDescription(new RTCSessionDescription(currentCall.pendingOffer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    currentCall.pc = pc;
+    currentCall.localStream = localStream;
+    delete currentCall.pendingOffer;
+
+    setCallUIState('active', 'Connecting\u2026');
+    openContact(fingerprint);
+    await sendCallSignal(fingerprint, 'answer', { sdp: answer });
+  } catch (err) {
+    showError('Could not accept call: ' + err.message);
+    endCall(fingerprint, true);
+  }
+}
+
+function declineCall() {
+  const fingerprint = el('incomingCallBanner').dataset.fingerprint;
+  hideIncomingCallBanner();
+  if (fingerprint) sendCallSignal(fingerprint, 'end', { reason: 'declined' }).catch(() => {});
+  currentCall = null;
+}
+
+async function handleIncomingAnswer(fromFingerprint, data) {
+  if (!currentCall || currentCall.fingerprint !== fromFingerprint || !currentCall.pc) return;
+  await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+}
+
+async function handleIncomingIce(fromFingerprint, data) {
+  if (!currentCall || currentCall.fingerprint !== fromFingerprint || !currentCall.pc) return;
+  try {
+    await currentCall.pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+  } catch (err) {
+    console.error('Could not add ICE candidate:', err);
+  }
+}
+
+function handleIncomingEnd(fromFingerprint) {
+  if (!currentCall || currentCall.fingerprint !== fromFingerprint) return;
+  if (el('incomingCallBanner').dataset.fingerprint === fromFingerprint) hideIncomingCallBanner();
+  endCall(fromFingerprint, false);
+}
+
+function endCall(fingerprint, notifyPeer) {
+  const target = fingerprint || (currentCall && currentCall.fingerprint);
+
+  if (currentCall && currentCall.pc) {
+    try { currentCall.pc.close(); } catch {}
+  }
+  if (currentCall && currentCall.localStream) {
+    currentCall.localStream.getTracks().forEach((t) => t.stop());
+  }
+  const audio = el('remoteAudio');
+  if (audio) audio.srcObject = null;
+
+  currentCall = null;
+  setCallUIState('idle', '');
+
+  if (notifyPeer && target) {
+    sendCallSignal(target, 'end', { reason: 'hangup' }).catch(() => {});
+  }
+}
+
+window.addEventListener('beforeunload', () => {
+  if (currentCall) endCall(currentCall.fingerprint, true);
+});
+
+// ---- Voice recording ----
+let mediaRecorder = null;
+let recordedChunks = [];
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    recordedChunks = [];
+    mediaRecorder.ondataavailable = (e) => recordedChunks.push(e.data);
+    mediaRecorder.onstop = async () => {
+      const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+      const file = new File([blob], 'voice-note.webm', { type: 'audio/webm' });
+      await sendFile(file, 'voice');
+    };
+    mediaRecorder.start();
+    el('recordBtn').textContent = 'Stop recording';
+  } catch (err) {
+    showError('Could not access microphone: ' + err.message);
+  }
+}
+function stopRecording() {
+  if (mediaRecorder) mediaRecorder.stop();
+  el('recordBtn').textContent = 'Record voice note';
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  init();
+
+  el('addContactBtn').addEventListener('click', addContactFlow);
+  el('backBtn').addEventListener('click', closeChat);
+  el('sendBtn').addEventListener('click', sendText);
+  document.querySelectorAll('.theme-swatch').forEach((btn) => {
+    btn.addEventListener('click', () => applyTheme(btn.dataset.themeOption));
+  });
+  el('messageInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendText();
+  });
+  el('imageInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) sendFile(file, 'image');
+    e.target.value = '';
+  });
+
+  let recording = false;
+  el('recordBtn').addEventListener('click', () => {
+    recording = !recording;
+    if (recording) startRecording();
+    else stopRecording();
+  });
+
+  el('callBtn').addEventListener('click', () => startCall(activeFingerprint));
+  el('endCallBtn').addEventListener('click', () => {
+    if (currentCall) endCall(currentCall.fingerprint, true);
+  });
+  el('acceptCallBtn').addEventListener('click', acceptCall);
+  el('declineCallBtn').addEventListener('click', declineCall);
+});
   }
 }
 
